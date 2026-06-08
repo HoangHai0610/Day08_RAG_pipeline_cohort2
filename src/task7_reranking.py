@@ -9,7 +9,32 @@ Chọn 1 trong các phương pháp:
 Nếu dùng MMR hoặc RRF, đảm bảo hiểu và giải thích được cơ chế.
 """
 
-from typing import Optional
+import math
+
+try:
+    from .task4_chunking_indexing import embed_text, tokenize
+    from .task5_semantic_search import cosine_similarity
+except ImportError:  # Cho phép chạy trực tiếp: python src/task7_reranking.py
+    from task4_chunking_indexing import embed_text, tokenize
+    from task5_semantic_search import cosine_similarity
+
+
+def lexical_overlap_score(query: str, content: str) -> float:
+    """Tính điểm liên quan local bằng overlap token giữa query và document."""
+    query_tokens = tokenize(query)
+    content_tokens = tokenize(content)
+    if not query_tokens or not content_tokens:
+        return 0.0
+
+    query_set = set(query_tokens)
+    content_set = set(content_tokens)
+    overlap = query_set.intersection(content_set)
+    coverage = len(overlap) / len(query_set)
+
+    # Boost nhẹ nếu token query xuất hiện nhiều lần trong content.
+    frequency = sum(content_tokens.count(token) for token in overlap)
+    frequency_boost = math.log1p(frequency) / 10
+    return min(1.0, coverage + frequency_boost)
 
 
 def rerank_cross_encoder(
@@ -26,30 +51,28 @@ def rerank_cross_encoder(
     Returns:
         List of top_k candidates, re-scored và sorted by rerank_score descending.
     """
-    # TODO: Implement cross-encoder reranking
-    #
-    # Option A: Jina Reranker API
-    # import requests
-    # response = requests.post(
-    #     "https://api.jina.ai/v1/rerank",
-    #     headers={"Authorization": f"Bearer {JINA_API_KEY}"},
-    #     json={
-    #         "model": "jina-reranker-v2-base-multilingual",
-    #         "query": query,
-    #         "documents": [c["content"] for c in candidates],
-    #         "top_n": top_k
-    #     }
-    # )
-    # reranked = response.json()["results"]
-    # return [
-    #     {**candidates[r["index"]], "score": r["relevance_score"]}
-    #     for r in reranked
-    # ]
-    #
-    # Option B: Local model (Qwen3-Reranker)
-    # from transformers import AutoModelForSequenceClassification, AutoTokenizer
-    # ...
-    raise NotImplementedError("Implement rerank_cross_encoder")
+    if top_k <= 0 or not candidates:
+        return []
+
+    query_embedding = embed_text(query)
+    scored = []
+    for rank, candidate in enumerate(candidates, 1):
+        content = candidate.get("content", "")
+        semantic = cosine_similarity(query_embedding, candidate.get("embedding") or embed_text(content))
+        lexical = lexical_overlap_score(query, content)
+        original = float(candidate.get("score", 0.0))
+        original_norm = original / (1.0 + abs(original))
+
+        # Local cross-encoder surrogate: ưu tiên match trực tiếp, giữ lại tín hiệu semantic/original.
+        rerank_score = 0.55 * lexical + 0.30 * max(0.0, semantic) + 0.15 * original_norm
+        item = candidate.copy()
+        item["score"] = round(float(rerank_score), 6)
+        item["metadata"] = candidate.get("metadata", {})
+        item["metadata"] = {**item["metadata"], "original_rank": rank}
+        scored.append(item)
+
+    scored.sort(key=lambda item: item["score"], reverse=True)
+    return scored[:top_k]
 
 
 def rerank_mmr(
@@ -72,37 +95,46 @@ def rerank_mmr(
     Returns:
         List of top_k candidates selected by MMR.
     """
-    # TODO: Implement MMR
-    #
-    # selected = []
-    # remaining = list(range(len(candidates)))
-    #
-    # for _ in range(min(top_k, len(candidates))):
-    #     best_idx = None
-    #     best_score = float('-inf')
-    #
-    #     for idx in remaining:
-    #         # Relevance to query
-    #         relevance = cosine_sim(query_embedding, candidates[idx]["embedding"])
-    #
-    #         # Max similarity to already selected
-    #         max_sim_to_selected = 0
-    #         for sel_idx in selected:
-    #             sim = cosine_sim(candidates[idx]["embedding"], candidates[sel_idx]["embedding"])
-    #             max_sim_to_selected = max(max_sim_to_selected, sim)
-    #
-    #         # MMR score
-    #         mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim_to_selected
-    #
-    #         if mmr_score > best_score:
-    #             best_score = mmr_score
-    #             best_idx = idx
-    #
-    #     selected.append(best_idx)
-    #     remaining.remove(best_idx)
-    #
-    # return [candidates[i] for i in selected]
-    raise NotImplementedError("Implement rerank_mmr")
+    if top_k <= 0 or not candidates:
+        return []
+
+    prepared = []
+    for candidate in candidates:
+        item = candidate.copy()
+        item["embedding"] = candidate.get("embedding") or embed_text(candidate.get("content", ""))
+        prepared.append(item)
+
+    selected_indices = []
+    remaining = list(range(len(prepared)))
+
+    while remaining and len(selected_indices) < top_k:
+        best_idx = None
+        best_score = float("-inf")
+
+        for idx in remaining:
+            relevance = cosine_similarity(query_embedding, prepared[idx]["embedding"])
+            diversity_penalty = 0.0
+            if selected_indices:
+                diversity_penalty = max(
+                    cosine_similarity(prepared[idx]["embedding"], prepared[selected]["embedding"])
+                    for selected in selected_indices
+                )
+
+            mmr_score = lambda_param * relevance - (1 - lambda_param) * diversity_penalty
+            if mmr_score > best_score:
+                best_score = mmr_score
+                best_idx = idx
+
+        selected_indices.append(best_idx)
+        remaining.remove(best_idx)
+
+    results = []
+    for idx in selected_indices:
+        item = prepared[idx].copy()
+        item["score"] = round(float(max(0.0, cosine_similarity(query_embedding, item["embedding"]))), 6)
+        item.pop("embedding", None)
+        results.append(item)
+    return results
 
 
 def rerank_rrf(
@@ -121,28 +153,32 @@ def rerank_rrf(
     Returns:
         List of top_k candidates sorted by RRF score descending.
     """
-    # TODO: Implement RRF
-    #
-    # rrf_scores = {}  # content -> score
-    # content_map = {}  # content -> full dict
-    #
-    # for ranked_list in ranked_lists:
-    #     for rank, item in enumerate(ranked_list, 1):
-    #         key = item["content"]
-    #         rrf_scores[key] = rrf_scores.get(key, 0) + 1 / (k + rank)
-    #         content_map[key] = item
-    #
-    # # Sort by RRF score
-    # sorted_items = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
-    #
-    # results = []
-    # for content, score in sorted_items[:top_k]:
-    #     item = content_map[content].copy()
-    #     item["score"] = score
-    #     results.append(item)
-    #
-    # return results
-    raise NotImplementedError("Implement rerank_rrf")
+    if top_k <= 0:
+        return []
+
+    rrf_scores = {}
+    content_map = {}
+
+    for ranked_list in ranked_lists:
+        for rank, item in enumerate(ranked_list, 1):
+            metadata = item.get("metadata", {})
+            key = metadata.get("chunk_id") or metadata.get("index_id") or item.get("content", "")
+            if not key:
+                continue
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (k + rank)
+            if key not in content_map or item.get("score", 0) > content_map[key].get("score", 0):
+                content_map[key] = item
+
+    sorted_keys = sorted(rrf_scores, key=lambda key: rrf_scores[key], reverse=True)
+
+    results = []
+    for key in sorted_keys[:top_k]:
+        item = content_map[key].copy()
+        item["score"] = round(float(rrf_scores[key]), 6)
+        item["metadata"] = item.get("metadata", {})
+        results.append(item)
+
+    return results
 
 
 # =============================================================================
@@ -167,14 +203,15 @@ def rerank(
     Returns:
         List of top_k reranked candidates.
     """
+    if top_k <= 0 or not candidates:
+        return []
+
     if method == "cross_encoder":
         return rerank_cross_encoder(query, candidates, top_k)
     elif method == "mmr":
-        # Cần query_embedding - embed query trước
-        raise NotImplementedError("Call rerank_mmr with query_embedding")
+        return rerank_mmr(embed_text(query), candidates, top_k)
     elif method == "rrf":
-        # RRF cần nhiều ranked lists - gọi riêng
-        raise NotImplementedError("Call rerank_rrf with ranked_lists")
+        return rerank_rrf([candidates], top_k=top_k)
     else:
         raise ValueError(f"Unknown rerank method: {method}")
 
@@ -188,4 +225,5 @@ if __name__ == "__main__":
     ]
     results = rerank("hình phạt tàng trữ ma tuý", dummy_candidates, top_k=2)
     for r in results:
-        print(f"[{r['score']:.3f}] {r['content']}")
+        preview = ascii(r["content"])[1:-1]
+        print(f"[{r['score']:.3f}] {preview}")

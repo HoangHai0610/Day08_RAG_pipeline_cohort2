@@ -1,0 +1,11 @@
+Open http://127.0.0.1:8000
+Ollama available: False | model: qwen2.5:3b
+[web] "GET /api/status HTTP/1.1" 200 -
+[web] "POST /api/chat HTTP/1.1" 500 -
+[web] "POST /api/chat HTTP/1.1" 200 -
+[web] "POST /api/chat HTTP/1.1" 200 -
+[web] "GET / HTTP/1.1" 200 -
+[web] "GET / HTTP/1.1" 200 -
+[web] code 404, message Not Found
+[web] "GET /favicon.ico HTTP/1.1" 404 -
+[web] "GET /api/status HTTP/1.1" 200 -

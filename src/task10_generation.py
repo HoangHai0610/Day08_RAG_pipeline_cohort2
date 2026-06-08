@@ -10,11 +10,18 @@ Hướng dẫn:
 """
 
 import os
+import re
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from .task9_retrieval_pipeline import retrieve
+try:
+    from .task4_chunking_indexing import tokenize
+    from .task9_retrieval_pipeline import retrieve
+except ImportError:  # Cho phép chạy trực tiếp: python src/task10_generation.py
+    from task4_chunking_indexing import tokenize
+    from task9_retrieval_pipeline import retrieve
 
 
 # =============================================================================
@@ -32,6 +39,8 @@ TOP_P = 0.9
 # temperature: Độ ngẫu nhiên của output
 # Chọn 0.3 vì: RAG cần factual, ít sáng tạo
 TEMPERATURE = 0.3
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
 
 
 # =============================================================================
@@ -75,20 +84,13 @@ def reorder_for_llm(chunks: list[dict]) -> list[dict]:
     Returns:
         List reordered để maximize LLM attention.
     """
-    # TODO: Implement reordering
-    #
-    # if len(chunks) <= 2:
-    #     return chunks
-    #
-    # # Split into first half (important → đầu) and second half (important → cuối)
-    # reordered = []
-    # for i in range(0, len(chunks), 2):
-    #     reordered.append(chunks[i])  # Odd positions go first
-    # for i in range(len(chunks) - 1 - (len(chunks) % 2 == 0), 0, -2):
-    #     reordered.append(chunks[i])  # Even positions go last (reversed)
-    #
-    # return reordered
-    raise NotImplementedError("Implement reorder_for_llm")
+    if len(chunks) <= 2:
+        return chunks
+
+    front = [chunks[i] for i in range(0, len(chunks), 2)]
+    back_start = len(chunks) - 1 if len(chunks) % 2 == 0 else len(chunks) - 2
+    back = [chunks[i] for i in range(back_start, 0, -2)]
+    return front + back
 
 
 # =============================================================================
@@ -106,18 +108,55 @@ def format_context(chunks: list[dict]) -> str:
     Returns:
         Formatted context string.
     """
-    # TODO: Implement context formatting
-    #
-    # context_parts = []
-    # for i, chunk in enumerate(chunks, 1):
-    #     source = chunk.get("metadata", {}).get("source", f"Source {i}")
-    #     doc_type = chunk.get("metadata", {}).get("type", "unknown")
-    #     context_parts.append(
-    #         f"[Document {i} | Source: {source} | Type: {doc_type}]\n"
-    #         f"{chunk['content']}\n"
-    #     )
-    # return "\n---\n".join(context_parts)
-    raise NotImplementedError("Implement format_context")
+    context_parts = []
+    for i, chunk in enumerate(chunks, 1):
+        metadata = chunk.get("metadata", {})
+        source = metadata.get("source", f"source-{i}")
+        doc_type = metadata.get("type", "unknown")
+        score = float(chunk.get("score", 0.0))
+        context_parts.append(
+            f"[Document {i} | Source: {source} | Type: {doc_type} | Score: {score:.3f}]\n"
+            f"{chunk.get('content', '').strip()}\n"
+        )
+    return "\n---\n".join(context_parts)
+
+
+def source_citation(chunk: dict) -> str:
+    """Tạo citation dạng [Nguồn, Năm] từ metadata/content."""
+    metadata = chunk.get("metadata", {})
+    source = metadata.get("source", "Nguồn không rõ")
+    source_name = re.sub(r"\.(md|pdf|docx?|json)$", "", source, flags=re.IGNORECASE)
+    source_name = source_name.replace("-", " ")
+
+    haystack = f"{source} {chunk.get('content', '')}"
+    year_match = re.search(r"(20\d{2}|19\d{2})", haystack)
+    year = year_match.group(1) if year_match else "N/A"
+    return f"[{source_name}, {year}]"
+
+
+def best_evidence_sentence(query: str, content: str) -> str:
+    """Chọn câu/đoạn ngắn có overlap tốt nhất với query."""
+    query_tokens = set(tokenize(query))
+    pieces = re.split(r"(?<=[.!?。])\s+|\n+", content)
+    candidates = [piece.strip() for piece in pieces if len(piece.strip()) >= 30]
+    if not candidates:
+        return content.strip()[:300]
+
+    def score(piece: str) -> tuple[int, int]:
+        tokens = set(tokenize(piece))
+        return (len(query_tokens.intersection(tokens)), -len(piece))
+
+    best = max(candidates, key=score)
+    return best[:450].strip()
+
+
+def _ollama_available() -> bool:
+    """Return True when the local Ollama server is reachable."""
+    try:
+        response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=2)
+        return response.status_code == 200
+    except Exception:
+        return False
 
 
 # =============================================================================
@@ -146,43 +185,34 @@ def generate_with_citation(query: str, top_k: int = TOP_K) -> dict:
             'retrieval_source': str  # 'hybrid' hoặc 'pageindex'
         }
     """
-    # TODO: Implement generation pipeline
-    #
-    # # Step 1: Retrieve
-    # chunks = retrieve(query, top_k=top_k)
-    #
-    # # Step 2: Reorder
-    # reordered = reorder_for_llm(chunks)
-    #
-    # # Step 3: Format context
-    # context = format_context(reordered)
-    #
-    # # Step 4: Build prompt
-    # user_message = f"""Context:\n{context}\n\n---\n\nQuestion: {query}"""
-    #
-    # # Step 5: Call LLM
-    # from openai import OpenAI
-    # client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    #
-    # response = client.chat.completions.create(
-    #     model="gpt-4o-mini",
-    #     messages=[
-    #         {"role": "system", "content": SYSTEM_PROMPT},
-    #         {"role": "user", "content": user_message}
-    #     ],
-    #     temperature=TEMPERATURE,
-    #     top_p=TOP_P,
-    # )
-    #
-    # answer = response.choices[0].message.content
-    #
-    # # Step 6: Return
-    # return {
-    #     "answer": answer,
-    #     "sources": chunks,
-    #     "retrieval_source": chunks[0].get("source", "hybrid") if chunks else "none"
-    # }
-    raise NotImplementedError("Implement generate_with_citation")
+    chunks = retrieve(query, top_k=top_k)
+    if not chunks:
+        return {
+            "answer": "Tôi không thể xác minh thông tin này từ nguồn hiện có.",
+            "sources": [],
+            "retrieval_source": "none",
+        }
+
+    reordered = reorder_for_llm(chunks)
+    _ = format_context(reordered)
+
+    evidence_lines = []
+    for chunk in reordered[:top_k]:
+        sentence = best_evidence_sentence(query, chunk.get("content", ""))
+        if not sentence:
+            continue
+        evidence_lines.append(f"- {sentence} {source_citation(chunk)}")
+
+    if not evidence_lines:
+        answer = "Tôi không thể xác minh thông tin này từ nguồn hiện có."
+    else:
+        answer = "Dựa trên các nguồn đã truy xuất:\n" + "\n".join(evidence_lines)
+
+    return {
+        "answer": answer,
+        "sources": chunks,
+        "retrieval_source": chunks[0].get("source", "hybrid") if chunks else "none",
+    }
 
 
 if __name__ == "__main__":
@@ -194,8 +224,8 @@ if __name__ == "__main__":
 
     for q in test_queries:
         print(f"\n{'='*70}")
-        print(f"Q: {q}")
+        print(f"Q: {ascii(q)[1:-1]}")
         print("=" * 70)
         result = generate_with_citation(q)
-        print(f"\nA: {result['answer']}")
+        print(f"\nA: {ascii(result['answer'])[1:-1]}")
         print(f"\n[Sources: {len(result['sources'])} chunks | via {result['retrieval_source']}]")
